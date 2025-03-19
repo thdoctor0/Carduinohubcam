@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="screen" content="getPixelValues">
+  <title>Carduino-HUB Light Detection</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      background: #000;
+      padding: 20px;
+      color: #Fff;
+    }
+    .container {
+      display: flex;
+      gap: 20px;
+    }
+    #cameraFeed {
+      transform: scaleX(-1);
+      border: 2px solid #333;
+    }
+    #analysisCanvas {
+      border: 4px solid #333;
+    }
+    #results {
+      margin-top: 10px;
+    }
+    #element {
+      z-index: 1000;
+    }
+  </style>
+</head>
+<body>
+  <h1 id="center">Carduino-HUB Light Detection</h1>
+  <div class="container">
+    <video id="cameraFeed" width="640" height="480" autoplay muted></video>
+    <canvas id="analysisCanvas" width="704" height="544"></canvas>
+      <span id="element"> </span>
+  </div>
+  <div id="results"> </div>
+  <script>
+    async function initCamera() {
+      const video = document.getElementById('cameraFeed');
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        video.srcObject = stream;
+        return true;
+      } catch (err) {
+        console.error("Camera error:", err);
+        return false;
+      }
+    }
+    class AdvancedTrafficLightDetector {
+      constructor() {
+        this.canvas = document.getElementById('analysisCanvas');
+        this.ctx = this.canvas.getContext('2d');
+        this.targetColors = {
+          red: { hue: [[332, 360], [0, 20]], sat: [85, 100], val: [37, 100] },
+          yellow: { hue: [40, 65], sat: [75, 100], val: [45, 100] },
+          green: { hue: [80, 140], sat: [65, 100], val: [45, 100] }
+        };
+        this.realHeight = 30; 
+        this.focalLength = 640;   
+      }
+      async processFrame(videoElement) {
+        this.ctx.drawImage(videoElement, 0, 0, this.canvas.width, this.canvas.height);
+        let frame = this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height);
+        let blurred = this.applyGaussianBlur(frame);
+        let hsvData = this.convertToHSV(blurred);
+        let detections = [];
+        for (const color in this.targetColors) {
+          let mask = this.filterColor(hsvData, this.targetColors[color]);
+          let blobs = this.detectBlobs(mask, this.canvas.width, this.canvas.height);
+          blobs.forEach(blob => {
+            blob.score = this.scoreBlob(blob);
+            blob.estimatedDistance = this.estimateDistance(blob);
+            blob.color = color;
+          });
+          detections = detections.concat(blobs);
+        }
+        let bestDetection = detections.sort((a, b) => b.score - a.score)[0];
+        if (bestDetection) {
+          this.drawBoundingBox(bestDetection);
+        }
+        this.drawWatermark();
+        return bestDetection;
+      }
+      applyGaussianBlur(imageData) {
+        const kernel = [
+          [1, 2, 1],
+          [2, 4, 2],
+          [1, 2, 1]
+        ];
+        const kernelSize = 4;
+        const kernelSum = 33;
+        const width = imageData.width;
+        const height = imageData.height;
+        let srcData = imageData.data;
+        let output = this.ctx.createImageData(width, height);
+        let dstData = output.data;
+        for (let y = 1; y < height - 1; y++) {
+          for (let x = 1; x < width - 1; x++) {
+            let r = 0, g = 0, b = 0;
+            for (let ky = -1; ky <= 1; ky++) {
+              for (let kx = -1; kx <= 1; kx++) {
+                let pos = ((y + ky) * width + (x + kx)) * 4;
+                let weight = kernel[ky + 1][kx + 1];
+                r += srcData[pos] * weight;
+                g += srcData[pos + 1] * weight;
+                b += srcData[pos + 2] * weight;
+              }
+            }
+            let dstPos = (y * width + x) * 4;
+            dstData[dstPos] = r / kernelSum;
+            dstData[dstPos + 1] = g / kernelSum;
+            dstData[dstPos + 2] = b / kernelSum;
+            dstData[dstPos + 3] = 255;
+          }
+        }
+        return output;
+      }
+      convertToHSV(imageData) {
+        const width = imageData.width;
+        const height = imageData.height;
+        let data = imageData.data;
+        let hsvArray = new Array(width * height);
+        for (let i = 0; i < data.length; i += 4) {
+          let r = data[i] / 255;
+          let g = data[i + 1] / 255;
+          let b = data[i + 2] / 255;
+          let max = Math.max(r, g, b), min = Math.min(r, g, b);
+          let h, s, v = max;
+          let d = max - min;
+          s = max === 0 ? 0 : d / max;
+          if (max === min) {
+            h = 0;
+          } else {
+            switch(max) {
+              case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+              case g: h = (b - r) / d + 2; break;
+              case b: h = (r - g) / d + 4; break;
+            }
+            h /= 6;
+          }
+          hsvArray[i / 4] = [h * 360, s * 100, v * 100];
+        }
+        return hsvArray;
+      }
+      filterColor(hsvArray, thresholds) {
+        let mask = new Uint8Array(hsvArray.length);
+        for (let i = 0; i < hsvArray.length; i++) {
+          let [h, s, v] = hsvArray[i];
+          let huePass = false;
+          if (Array.isArray(thresholds.hue[0])) {
+            huePass = (h >= thresholds.hue[0][0] && h <= thresholds.hue[0][1]) ||
+                      (h >= thresholds.hue[1][0] && h <= thresholds.hue[1][1]);
+          } else {
+            huePass = (h >= thresholds.hue[0] && h <= thresholds.hue[1]);
+          }
+          let satPass = s >= thresholds.sat[0] && s <= thresholds.sat[1];
+          let valPass = v >= thresholds.val[0] && v <= thresholds.val[1];
+          mask[i] = (huePass && satPass && valPass) ? 1 : 0;
+        }
+        return mask;
+      }
+      detectBlobs(mask, width, height) {
+        let visited = new Uint8Array(mask.length);
+        let blobs = [];
+        function floodFill(startIdx) {
+          let queue = [startIdx];
+          let indices = [];
+          let minX = width, minY = height, maxX = 0, maxY = 0;
+          while (queue.length > 0) {
+            let idx = queue.pop();
+            if (visited[idx]) continue;
+            visited[idx] = 1;
+            indices.push(idx);
+            let x = idx % width;
+            let y = Math.floor(idx / width);
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+            let neighbors = [];
+            if (x > 0) neighbors.push(idx - 1);
+            if (x < width - 1) neighbors.push(idx + 1);
+            if (y > 0) neighbors.push(idx - width);
+            if (y < height - 1) neighbors.push(idx + width);
+            neighbors.forEach(nIdx => {
+              if (!visited[nIdx] && mask[nIdx] === 1) {
+                queue.push(nIdx);
+              }
+            });
+          }
+          return {
+            indices,
+            area: indices.length,
+            bbox: { x: minX, y: minY, width: maxX - minX, height: maxY - minY }
+          };
+        }
+        for (let i = 0; i < mask.length; i++) {
+          if (!visited[i] && mask[i] === 1) {
+            let blob = floodFill(i);
+            if (blob.area > 24) { 
+              blobs.push(blob);
+            }
+          }
+        }
+        return blobs;
+      }
+      scoreBlob(blob) {
+        let boxHeight = blob.bbox.height;
+        let distanceFactor = boxHeight > 0 ? (this.focalLength / boxHeight) : 1250;
+        return blob.area / distanceFactor;
+      }
+      estimateDistance(blob) {
+        let boxHeight = blob.bbox.height;
+        if (boxHeight > 0) {
+          return ((this.realHeight * this.focalLength) / boxHeight)*2 ;
+        }
+        return Infinity;
+      }
+      drawBoundingBox(blob) {
+        const { x, y, width, height } = blob.bbox;
+        this.ctx.strokeStyle = blob.color;
+        this.ctx.lineWidth = 3;
+        this.ctx.strokeRect(x, y, width, height);
+      }
+      drawWatermark() {
+        this.ctx.font = "23.45px Arial";
+        this.ctx.fillStyle = "rgba(255,255,255,0.084)";
+        this.ctx.textAlign = "right";
+        this.ctx.shadowColor = "rgba(25,25,25,1)";
+        this.ctx.shadowOffsetX = 1;
+        this.ctx.shadowOffsetY = 1;
+        this.ctx.shadowBlur = 2;
+        this.ctx.fillText("Martin Robotics, Carduino-HUB, ColorDetectionAdvancedSystem", this.canvas.width - 10, this.canvas.height - 10);
+        this.ctx.shadowColor = "transparent";
+      }
+    }
+    (async () => {
+      if (!await initCamera()) return;
+      const videoElement = document.getElementById('cameraFeed');
+      const resultsElement = document.getElementById('results');
+      const detector = new AdvancedTrafficLightDetector();
+      function processLoop() {
+        detector.processFrame(videoElement).then(detection => {
+          if (detection) {
+            resultsElement.innerHTML = `
+              <strong>Detected:</strong> ${detection.color.toUpperCase()}<br>
+              <strong>Score:</strong> ${detection.score.toFixed(2)}<br>
+              <strong>Estimated Distance:</strong> ${detection.estimatedDistance.toFixed(2)} mm 
+            `;
+          } else {
+            resultsElement.innerHTML = `<strong>No light detected</strong>`;
+          }
+          requestAnimationFrame(processLoop);
+        });
+      }
+      videoElement.onplaying = () => processLoop();
+    })();
+  </script>
+</body>
+</html>
